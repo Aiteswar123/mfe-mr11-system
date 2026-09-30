@@ -127,7 +127,7 @@ export async function exportMr11ToExcel(req: Request, res: Response) {
       }
     });
 
-    // Columns merged across the stream (Shellplan & Design)
+    // Merged ONLY for ShellPlan and Design across the [Project, Stream] span
     const STREAM_MERGE_COLS = [
       'Shell Plan Status - Pending Consultant Drawings', // Col AJ
       'Shell Plan Approved Date',                         // Col AK
@@ -137,13 +137,12 @@ export async function exportMr11ToExcel(req: Request, res: Response) {
     ];
 
     STREAM_MERGE_COLS.forEach((colName) => {
-      // Find matching column index (check exact or startsWith)
       const colIdx = headers.findIndex(
-        (h) => h === colName || h.toLowerCase().startsWith(colName.toLowerCase())
+        (h) => h === colName || h.toLowerCase().trim() === colName.toLowerCase().trim()
       ) + 1;
 
       if (colIdx > 0) {
-        let r = 2; // Row index in Excel (1 is header)
+        let r = 2; // Excel row index starts at 2 (1 is the header)
         for (let i = 0; i < records.length; ) {
           const span = records[i]['_streamSpan'] || 1;
           if (span > 1) {

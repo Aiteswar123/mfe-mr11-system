@@ -70,7 +70,8 @@ function getProjectIdentifier(row: Record<string, any>): string {
     row['Project No.'] ||
     row['Project No. (from design column A)'] ||
     row['Project No. (from bd column B)'] ||
-    row['PROJECT NO']
+    row['PROJECT NO'] ||
+    row['PROJECT NO.']
   );
   const pShort = cleanStr(
     row['Short Name'] ||
@@ -94,7 +95,7 @@ function parseFlexibleDate(val: any): Date | null {
   if (val instanceof Date) return isNaN(val.getTime()) ? null : val;
 
   const rawStr = String(val).trim();
-  if (!rawStr || rawStr === '-' || rawStr === '0' || rawStr.toLowerCase() === 'null') return null;
+  if (!rawStr || rawStr === '-' || rawStr === '0' || rawStr.toLowerCase() === 'null' || rawStr.toLowerCase() === 'tbc') return null;
 
   const num = typeof val === 'number' ? val : parseFloat(rawStr);
   if (!isNaN(num) && num > 30000 && !rawStr.includes('/') && !rawStr.includes('-')) {
@@ -137,37 +138,72 @@ function formatDateString(val: any): string | null {
   return String(val).trim();
 }
 
+/**
+ * Design Status Precedence:
+ * Ongoing > Completed (mixed with to start) > Completed > To Start
+ */
 function resolveConsolidatedDesignStatus(statuses: string[]): string {
-  if (statuses.length === 0) return 'Not Start';
+  if (statuses.length === 0) return 'to start';
   const normalized = statuses.map((s) => s.toLowerCase().trim());
   const hasCompleted = normalized.some((s) => s.includes('complete'));
   const hasOngoing = normalized.some((s) => s.includes('ongoing') || s.includes('progress') || s.includes('in progress'));
-  const hasNotStarted = normalized.some((s) => s.includes('start') || s.includes('pending') || s.includes('hold'));
+  const hasToStart = normalized.some((s) => s.includes('start') || s.includes('pending') || s.includes('hold'));
 
-  if (hasOngoing || (hasCompleted && hasNotStarted)) return 'Ongoing';
-  if (hasCompleted && !hasNotStarted && !hasOngoing) return 'Completed';
-  return 'Not Start';
+  if (hasOngoing || (hasCompleted && hasToStart)) return 'ongoing';
+  if (hasCompleted && !hasToStart && !hasOngoing) return 'Completed';
+  return 'to start';
 }
 
+function resolveConsolidatedHolingStatus(statuses: string[]): string {
+  if (statuses.length === 0) return 'Not Completed';
+  const normalized = statuses.map((s) => s.toLowerCase().trim());
+  return normalized.every((s) => s === 'completed') ? 'Completed' : 'Not Completed';
+}
+
+function resolveConsolidatedAccessoriesStatus(statuses: string[]): string {
+  if (statuses.length === 0) return 'to start';
+  const normalized = statuses.map((s) => s.toLowerCase().trim());
+  if (normalized.every((s) => s === 'completed')) return 'completed';
+  if (normalized.some((s) => s.includes('ongoing') || s.includes('progress') || s === 'completed')) return 'ongoing';
+  if (normalized.some((s) => s.includes('hold'))) return 'on hold';
+  return 'to start';
+}
+
+/**
+ * Strict ShellPlan Precedence Hierarchy:
+ * 1. In Progress (Highest operational priority)
+ * 2. Pending Consultant Drawings
+ * 3. Re-approved
+ * 4. Approved (Only when all items are approved)
+ * 5. Not Started
+ */
 function resolveConsolidatedShellplanStatus(statuses: string[]): string {
   if (statuses.length === 0) return 'Not Started';
+
   const normalized = statuses.map((s) => s.toLowerCase().trim());
 
   if (normalized.some((s) => s.includes('progress') || s.includes('ongoing'))) {
     return 'In Progress';
   }
-  if (normalized.some((s) => s.includes('pending'))) {
+
+  if (normalized.some((s) => s.includes('pending') || s.includes('drawing') || s.includes('waiting'))) {
     return 'Pending Consultant Drawings';
   }
-  const allApproved = normalized.every((s) => s.includes('approve'));
-  if (allApproved) {
+
+  if (normalized.some((s) => s.includes('re-approve') || s.includes('reapprove') || s.includes('re approved'))) {
+    return 'Re-approved';
+  }
+
+  if (normalized.every((s) => s.includes('approve') || s.includes('completed') || s === 'issued')) {
     return 'Approved';
   }
-  const allNotStarted = normalized.every((s) => s.includes('start') || s.includes('haven') || s.includes('hold'));
-  if (allNotStarted) {
+
+  if (normalized.every((s) => s.includes('start') || s.includes('haven') || s.includes('hold'))) {
     return 'Not Started';
   }
-  return normalized[0] ? normalized[0].charAt(0).toUpperCase() + normalized[0].slice(1) : 'Not Started';
+
+  const first = statuses[0].trim();
+  return first.charAt(0).toUpperCase() + first.slice(1);
 }
 
 function isCellFilled(val: any): boolean {
@@ -299,6 +335,7 @@ export function sheetToRecordsWithStyles(sheet: FortuneSheet): {
 
   const sortedRowKeys = Object.keys(rowsMap).map(Number).sort((a, b) => a - b);
 
+  // Multi-Building / Sub-level Forward-Fill Logic
   let lastProjectNo: any = null;
   let lastShortname: any = null;
   let lastName: any = null;
@@ -307,20 +344,22 @@ export function sheetToRecordsWithStyles(sheet: FortuneSheet): {
 
   for (const rKey of sortedRowKeys) {
     const row = rowsMap[rKey];
-    const pNo = row['Project No'] || row['Project No.'] || row['Project No. (from design column A)'] || row['Project No. (from bd column B)'];
+    const pNo = row['Project No'] || row['Project No.'] || row['Project No. (from design column A)'] || row['Project No. (from bd column B)'] || row['PROJECT NO'];
     const pShort = row['Short Name'] || row['Project Shortname'] || row['Project Shortname (from bd column C)'];
     const pName = row['Customer & Project Name'] || row['Project Name'] || row['Project Name (from design column B)'] || row['Project Name (from bd column A)'];
 
     if (pNo || pShort || pName) {
-      lastProjectNo = pNo || null;
-      lastShortname = pShort || null;
-      lastName = pName || null;
+      if (pNo) lastProjectNo = pNo;
+      if (pShort) lastShortname = pShort;
+      if (pName) lastName = pName;
       lastFontColor = rowStyleMap[rKey]?.fontColor;
       lastFillColor = rowStyleMap[rKey]?.fillColor;
     } else {
       if (lastProjectNo && !row['Project No']) row['Project No'] = lastProjectNo;
+      if (lastProjectNo && !row['Project No.']) row['Project No.'] = lastProjectNo;
       if (lastShortname && !row['Short Name']) row['Short Name'] = lastShortname;
       if (lastName && !row['Customer & Project Name']) row['Customer & Project Name'] = lastName;
+      if (lastName && !row['Project Name']) row['Project Name'] = lastName;
       if (lastFontColor && !rowStyleMap[rKey]?.fontColor) {
         rowStyleMap[rKey].fontColor = lastFontColor;
       }
@@ -401,7 +440,7 @@ export async function executeMr11Pipeline(prisma: PrismaClient): Promise<string>
   const todayStr = new Date().toISOString().split('T')[0];
 
   // --------------------------------------------------------------------------
-  // 1. PLANNING SERIES & QUANTITY TRACKER
+  // 1. PLANNING SERIES & QUANTITY TRACKER (Color & Stream tracked)
   // --------------------------------------------------------------------------
   const planningRows = datasetMap[RoleCode.PLANNING] || [];
   const incomingPlanningTotals: Record<string, { projectNo: string; pShort: string; pName: string; stream: string; fontColor: string; totalQty: number }> = {};
@@ -523,7 +562,7 @@ export async function executeMr11Pipeline(prisma: PrismaClient): Promise<string>
   }
 
   // --------------------------------------------------------------------------
-  // 2. PRODUCTION SERIES HISTORY
+  // 2. PRODUCTION SERIES HISTORY (Color & Stream tracked)
   // --------------------------------------------------------------------------
   const productionRows = datasetMap[RoleCode.PRODUCTION] || [];
 
@@ -698,14 +737,14 @@ export async function executeMr11Pipeline(prisma: PrismaClient): Promise<string>
     const outRow: Record<string, any> = {};
     const cellColors: Record<string, string> = {};
 
-    // 1. Populate all defined BD/Pre-Shellplan & Commercial Columns directly from BD
+    // 1. Populate defined BD columns directly from BD
     for (const mapping of MR11_ORDERED_COLUMNS) {
       if (mapping.sourceDept === RoleCode.BD) {
         outRow[mapping.target] = findCellValue(bdData, mapping.sourceColumn);
       }
     }
 
-    // 2. Generic Department Fallbacks (for any finance/other keys)
+    // 2. Generic Department Fallbacks
     for (const mapping of MR11_ORDERED_COLUMNS) {
       if (
         mapping.sourceDept !== RoleCode.BD &&
@@ -762,7 +801,6 @@ export async function executeMr11Pipeline(prisma: PrismaClient): Promise<string>
 
     // ------------------------------------------------------------------------
     // DISPATCH MAPPINGS: 5-POINT COMPOSITE KEY MATCHING
-    // (Short Code + Project Name + Stream + Font Colour + Row Fill Colour)
     // ------------------------------------------------------------------------
     const matchedDispatchRows = dispatchRows.filter((dRow) => {
       const dShort = cleanStr(
@@ -818,12 +856,8 @@ export async function executeMr11Pipeline(prisma: PrismaClient): Promise<string>
       return true;
     });
 
-    // ------------------------------------------------------------------------
-    // CUMULATIVE FORMWORK QUANTITY SAILED (m2)
-    // ------------------------------------------------------------------------
     let totalFormworkSailed = 0;
     let hasSailedValue = false;
-
     for (const dRow of matchedDispatchRows) {
       const rawSailed =
         findCellValue(dRow.data, 'Formwork Quantity Sailed (m2)') ??
@@ -842,7 +876,6 @@ export async function executeMr11Pipeline(prisma: PrismaClient): Promise<string>
     }
 
     const finalFormworkSailed = hasSailedValue ? totalFormworkSailed : null;
-
     outRow['Formwork Quantity Sailed (m2)'] = finalFormworkSailed;
     outRow['Formwork Quantity Sailed m2'] = finalFormworkSailed;
     outRow['Formwork Quantity Sailed'] = finalFormworkSailed;
@@ -862,9 +895,6 @@ export async function executeMr11Pipeline(prisma: PrismaClient): Promise<string>
       });
     }
 
-    // ------------------------------------------------------------------------
-    // TOTAL DISPATCH (COLUMN K) & DISPATCHED DATE TRACKER
-    // ------------------------------------------------------------------------
     let matchedDispatchRowForK: ExtractedRow | null = null;
     let directColumnKValue = 0;
 
@@ -891,7 +921,6 @@ export async function executeMr11Pipeline(prisma: PrismaClient): Promise<string>
     }
 
     const finalTotalDispatch = directColumnKValue > 0 ? directColumnKValue : null;
-
     outRow['Total Dispatch'] = finalTotalDispatch;
     outRow['Total Dispatched'] = finalTotalDispatch;
     outRow['Total Dispatched Quantity'] = finalTotalDispatch;
@@ -957,9 +986,6 @@ export async function executeMr11Pipeline(prisma: PrismaClient): Promise<string>
       });
     }
 
-    // ------------------------------------------------------------------------
-    // ROBUST ATD LOGIC: COLUMN W (INDEX 22) VS COLUMNS P TO V (INDICES 15-21)
-    // ------------------------------------------------------------------------
     let latestDateW: Date | null = null;
     let latestDateWStr: string | null = null;
     let latestDatePV: Date | null = null;
@@ -1055,9 +1081,7 @@ export async function executeMr11Pipeline(prisma: PrismaClient): Promise<string>
     cellColors['Actual Time of Departure'] = atdColor;
     outRow['_cellColors'] = cellColors;
 
-    // ------------------------------------------------------------------------
-    // MONTHLY BREAKDOWN & ANNUAL TOTALS (2026 & 2027) MAPPINGS FROM DISPATCH
-    // ------------------------------------------------------------------------
+    // Monthly breakdown
     const MONTH_COLUMNS_26 = ['Jan-26', 'Feb-26', 'Mar-26', 'Apr-26', 'May-26', 'Jun-26', 'Jul-26', 'Aug-26', 'Sep-26', 'Oct-26', 'Nov-26', 'Dec-26'];
     const MONTH_COLUMNS_27 = ['Jan-27', 'Feb-27', 'Mar-27', 'Apr-27', 'May-27', 'Jun-27', 'Jul-27', 'Aug-27', 'Sep-27', 'Oct-27', 'Nov-27', 'Dec-27'];
 
@@ -1086,46 +1110,56 @@ export async function executeMr11Pipeline(prisma: PrismaClient): Promise<string>
     });
     outRow['Total 2027 m2'] = sum2027 > 0 ? sum2027 : null;
 
-    // Fallback for remaining primary Dispatch non-volume attributes
-    const primaryDispatchRow = matchedDispatchRowForK || (matchedDispatchRows.length > 0 ? matchedDispatchRows[0] : null);
-    if (primaryDispatchRow) {
-      for (const mapping of MR11_ORDERED_COLUMNS) {
-        if (mapping.sourceDept === RoleCode.DISPATCH && !outRow[mapping.target]) {
-          outRow[mapping.target] = findCellValue(primaryDispatchRow.data, mapping.sourceColumn);
-        }
-      }
-    }
-
     // ------------------------------------------------------------------------
-    // DESIGN MAPPINGS (COL AL, AM, AN): STRICTLY BY STREAM (COLOR IGNORED)
+    // DESIGN MAPPINGS (Matched strictly by Stream)
     // ------------------------------------------------------------------------
     const streamMatchedDesign = designRows.filter((dRow) => {
-      const dProj = getProjectIdentifier(dRow.data);
-      let dStream = '1';
+      const dProjNo = cleanStr(findCellValue(dRow.data, 'Project No') || findCellValue(dRow.data, 'Project No.') || dRow.rawCells?.[0]);
+      const dProjName = cleanStr(findCellValue(dRow.data, 'Project Name') || findCellValue(dRow.data, 'Customer & Project Name') || dRow.rawCells?.[1]);
+      
+      let dStream: string | null = null;
       for (const sh of STREAM_HEADER_CANDIDATES) {
         const v = findCellValue(dRow.data, sh);
-        if (v !== null && v !== undefined && v !== '') {
+        if (v !== null && v !== undefined && String(v).trim() !== '') {
           dStream = normalizeStream(v);
           break;
         }
       }
 
-      const projMatches =
-        (projectNo && (dProj === projectNo || dProj.includes(projectNo) || projectNo.includes(dProj))) ||
-        (shortName && (dProj === shortName || dProj.includes(shortName) || shortName.includes(dProj))) ||
-        (projectName && (dProj === projectName || dProj.includes(projectName) || projectName.includes(dProj)));
+      const idMatches =
+        (projectNo && dProjNo && (dProjNo === projectNo || dProjNo.includes(projectNo) || projectNo.includes(dProjNo))) ||
+        (projectName && dProjName && (dProjName === projectName || dProjName.includes(projectName) || projectName.includes(dProjName))) ||
+        (shortName && dProjName && dProjName.includes(shortName));
 
-      return projMatches && dStream === bdStream;
+      if (!idMatches) return false;
+
+      if (dStream && dStream !== bdStream) {
+        return false;
+      }
+
+      return true;
     });
 
     const designStatuses = streamMatchedDesign
-      .map((d) => findCellValue(d.data, 'Formwork Design Status') || findCellValue(d.data, 'Design Status') || findCellValue(d.data, 'Status'))
-      .filter((v) => v !== null && v !== undefined && v !== '');
-    outRow['Formwork Design Status'] = resolveConsolidatedDesignStatus(designStatuses.map(String));
+      .map((d) => 
+        findCellValue(d.data, 'Formwork Design Status') || 
+        findCellValue(d.data, 'design status') || 
+        findCellValue(d.data, 'Design Status') ||
+        findCellValue(d.data, 'Status')
+      )
+      .filter((v) => v !== null && v !== undefined && String(v).trim() !== '');
+    const resolvedFormworkStatus = resolveConsolidatedDesignStatus(designStatuses.map(String));
+    outRow['Formwork Design Status'] = resolvedFormworkStatus;
+    outRow['design status'] = resolvedFormworkStatus;
 
     const designDates = streamMatchedDesign
-      .map((d) => findCellValue(d.data, 'Actual Formwork Order Completion Date') || findCellValue(d.data, 'Actual Completion Date') || findCellValue(d.data, 'Completion Date'))
-      .filter((v) => v !== null && v !== undefined && v !== '');
+      .map((d) =>
+        findCellValue(d.data, 'Actual Formwork Order Completion Date') ||
+        findCellValue(d.data, 'Actual Completion Date') ||
+        findCellValue(d.data, 'estimated design completion date (should be date or tbc) ') ||
+        findCellValue(d.data, 'Completion Date')
+      )
+      .filter((v) => v !== null && v !== undefined && String(v).trim() !== '');
     let latestDesignDate: string | null = null;
     for (const dv of designDates) {
       const fDate = formatDateString(dv);
@@ -1134,6 +1168,63 @@ export async function executeMr11Pipeline(prisma: PrismaClient): Promise<string>
       }
     }
     outRow['Actual Formwork Order Completion Date'] = latestDesignDate;
+    outRow['latest design date'] = latestDesignDate;
+
+    const holingStatuses = streamMatchedDesign
+      .map((d) => 
+        findCellValue(d.data, 'holing status (Completed/Not Completed/) -dropdown') || 
+        findCellValue(d.data, 'holing status') || 
+        findCellValue(d.data, 'Holing Status')
+      )
+      .filter((v) => v !== null && v !== undefined && String(v).trim() !== '');
+    const resolvedHolingStatus = resolveConsolidatedHolingStatus(holingStatuses.map(String));
+    outRow['holing status'] = resolvedHolingStatus;
+    outRow['Holing Status'] = resolvedHolingStatus;
+
+    const holingDates = streamMatchedDesign
+      .map((d) => 
+        findCellValue(d.data, 'holing completion date') || 
+        findCellValue(d.data, 'holing date') || 
+        findCellValue(d.data, 'Holing Completion Date')
+      )
+      .filter((v) => v !== null && v !== undefined && String(v).trim() !== '');
+    let latestHolingDate: string | null = null;
+    for (const hd of holingDates) {
+      const fDate = formatDateString(hd);
+      if (fDate && (!latestHolingDate || fDate > latestHolingDate)) {
+        latestHolingDate = fDate;
+      }
+    }
+    outRow['holing date'] = latestHolingDate;
+    outRow['Holing Date'] = latestHolingDate;
+
+    const accStatuses = streamMatchedDesign
+      .map((d) => 
+        findCellValue(d.data, 'accessories status dropdown (to start, ongoing, completed, on hold)') || 
+        findCellValue(d.data, 'accessories status') || 
+        findCellValue(d.data, 'Accessories Status')
+      )
+      .filter((v) => v !== null && v !== undefined && String(v).trim() !== '');
+    const resolvedAccStatus = resolveConsolidatedAccessoriesStatus(accStatuses.map(String));
+    outRow['accessories status'] = resolvedAccStatus;
+    outRow['Accessories Status'] = resolvedAccStatus;
+
+    const accDates = streamMatchedDesign
+      .map((d) => 
+        findCellValue(d.data, 'accessories completion date') || 
+        findCellValue(d.data, 'accessories date') || 
+        findCellValue(d.data, 'Accessories Completion Date')
+      )
+      .filter((v) => v !== null && v !== undefined && String(v).trim() !== '');
+    let latestAccDate: string | null = null;
+    for (const ad of accDates) {
+      const fDate = formatDateString(ad);
+      if (fDate && (!latestAccDate || fDate > latestAccDate)) {
+        latestAccDate = fDate;
+      }
+    }
+    outRow['accessories date'] = latestAccDate;
+    outRow['Accessories Date'] = latestAccDate;
 
     let totalQuantityOrdered = 0;
     let hasQuantity = false;
@@ -1143,8 +1234,7 @@ export async function executeMr11Pipeline(prisma: PrismaClient): Promise<string>
         findCellValue(d.data, 'Total Quantity Ordered (m2)') ??
         findCellValue(d.data, 'Total Quantity Ordered') ??
         findCellValue(d.data, 'Total Quantity') ??
-        findCellValue(d.data, 'Quantity Ordered') ??
-        findCellValue(d.data, 'Order Quantity');
+        findCellValue(d.data, 'Quantity Ordered');
       const num = parseNumeric(rawQ);
       if (!isNaN(num) && num > 0) {
         totalQuantityOrdered += num;
@@ -1155,6 +1245,7 @@ export async function executeMr11Pipeline(prisma: PrismaClient): Promise<string>
     outRow['Total Quantity Ordered m2'] = finalQuantityAN;
     outRow['Total Quantity Ordered (m2)'] = finalQuantityAN;
     outRow['Total Quantity Ordered'] = finalQuantityAN;
+    outRow['processed qty'] = finalQuantityAN;
 
     if (Array.isArray(ORDERED_HEADER_LIST) && ORDERED_HEADER_LIST.length >= 40) {
       const colANHeader = ORDERED_HEADER_LIST[39];
@@ -1164,44 +1255,83 @@ export async function executeMr11Pipeline(prisma: PrismaClient): Promise<string>
     }
 
     // ------------------------------------------------------------------------
-    // SHELLPLAN MAPPINGS (COL AJ, AK): STRICTLY BY STREAM (COLOR IGNORED)
+    // SHELLPLAN MAPPINGS (Matched strictly by Stream)
     // ------------------------------------------------------------------------
     const streamMatchedShellplan = shellplanRows.filter((spRow) => {
-      const spProj = getProjectIdentifier(spRow.data);
-      let spStream = '1';
+      const spProjNo = cleanStr(findCellValue(spRow.data, 'Project No') || findCellValue(spRow.data, 'Project No.') || spRow.rawCells?.[0]);
+      const spProjName = cleanStr(findCellValue(spRow.data, 'Project Name') || findCellValue(spRow.data, 'Customer & Project Name') || spRow.rawCells?.[1]);
+
+      let spStream: string | null = null;
       for (const sh of STREAM_HEADER_CANDIDATES) {
         const v = findCellValue(spRow.data, sh);
-        if (v !== null && v !== undefined && v !== '') {
+        if (v !== null && v !== undefined && String(v).trim() !== '') {
           spStream = normalizeStream(v);
           break;
         }
       }
-      const projMatches =
-        (projectNo && (spProj === projectNo || spProj.includes(projectNo) || projectNo.includes(spProj))) ||
-        (shortName && (spProj === shortName || spProj.includes(shortName) || shortName.includes(spProj))) ||
-        (projectName && (spProj === projectName || spProj.includes(projectName) || projectName.includes(spProj)));
-      return projMatches && spStream === bdStream;
+
+      const idMatches =
+        (projectNo && spProjNo && (spProjNo === projectNo || spProjNo.includes(projectNo) || projectNo.includes(spProjNo))) ||
+        (projectName && spProjName && (spProjName === projectName || spProjName.includes(projectName) || projectName.includes(spProjName))) ||
+        (shortName && spProjName && spProjName.includes(shortName));
+
+      if (!idMatches) return false;
+
+      if (spStream && spStream !== bdStream) {
+        return false;
+      }
+
+      return true;
     });
 
     const spStatuses = streamMatchedShellplan
-      .map((c) => findCellValue(c.data, 'Shell Plan Status - Pending Consultant Drawings') || findCellValue(c.data, 'Shell Plan Status'))
-      .filter((v) => v !== null && v !== undefined && v !== '');
-    outRow['Shell Plan Status - Pending Consultant Drawings'] = resolveConsolidatedShellplanStatus(spStatuses.map(String));
+      .map((c) =>
+        findCellValue(c.data, 'Shell Plan Status') ||
+        findCellValue(c.data, 'shellplan status') ||
+        findCellValue(c.data, 'Shell Plan Status - Pending Consultant Drawings') ||
+        findCellValue(c.data, 'Status')
+      )
+      .filter((v) => v !== null && v !== undefined && String(v).trim() !== '');
+    const resolvedSpStatus = resolveConsolidatedShellplanStatus(spStatuses.map(String));
+    outRow['shellplan status'] = resolvedSpStatus;
+    outRow['Shell Plan Status'] = resolvedSpStatus;
+    outRow['Shell Plan Status - Pending Consultant Drawings'] = resolvedSpStatus;
 
-    const spDates = streamMatchedShellplan
-      .map((c) => findCellValue(c.data, 'Shell Plan Approved Date') || findCellValue(c.data, 'Approved Date') || findCellValue(c.data, 'Latest Submission Date'))
-      .filter((v) => v !== null && v !== undefined && v !== '');
-    let latestSpDate: string | null = null;
-    for (const sv of spDates) {
+    const spRevisions = streamMatchedShellplan
+      .map((c) => findCellValue(c.data, 'Latest Revision') || findCellValue(c.data, 'latest revision version'))
+      .filter((v) => v !== null && v !== undefined && String(v).trim() !== '');
+    const latestRevision = spRevisions.length > 0 ? spRevisions[spRevisions.length - 1] : null;
+    outRow['latest revision version'] = latestRevision;
+    outRow['Latest Revision'] = latestRevision;
+
+    const spSubmissionDates = streamMatchedShellplan
+      .map((c) => findCellValue(c.data, 'Latest Submission Date') || findCellValue(c.data, 'latest revision date'))
+      .filter((v) => v !== null && v !== undefined && String(v).trim() !== '');
+    let latestSubmissionDateStr: string | null = null;
+    for (const sv of spSubmissionDates) {
       const fDate = formatDateString(sv);
-      if (fDate && (!latestSpDate || fDate > latestSpDate)) {
-        latestSpDate = fDate;
+      if (fDate && (!latestSubmissionDateStr || fDate > latestSubmissionDateStr)) {
+        latestSubmissionDateStr = fDate;
       }
     }
-    outRow['Shell Plan Approved Date'] = latestSpDate;
+    outRow['latest revision date'] = latestSubmissionDateStr;
+    outRow['Latest Submission Date'] = latestSubmissionDateStr;
+
+    const spApprovedDates = streamMatchedShellplan
+      .map((c) => findCellValue(c.data, 'Shell Plan Approved Date') || findCellValue(c.data, 'shellplan approval date') || findCellValue(c.data, 'Approved Date'))
+      .filter((v) => v !== null && v !== undefined && String(v).trim() !== '');
+    let latestApprovedDateStr: string | null = null;
+    for (const sv of spApprovedDates) {
+      const fDate = formatDateString(sv);
+      if (fDate && (!latestApprovedDateStr || fDate > latestApprovedDateStr)) {
+        latestApprovedDateStr = fDate;
+      }
+    }
+    outRow['shellplan approval date'] = latestApprovedDateStr;
+    outRow['Shell Plan Approved Date'] = latestApprovedDateStr;
 
     // ------------------------------------------------------------------------
-    // PLANNING MAPPINGS (COL AO, AP): COLOR & ROW FILL AWARE
+    // PLANNING MAPPINGS (Color & Fill Aware)
     // ------------------------------------------------------------------------
     const matchedPlanningSeries = allHistoricalPlanningSeries.filter((s) => {
       const pClean = cleanStr(s.projectNo);
@@ -1283,7 +1413,7 @@ export async function executeMr11Pipeline(prisma: PrismaClient): Promise<string>
     }
 
     // ------------------------------------------------------------------------
-    // PRODUCTION MAPPINGS (COL AQ, AR): COLOR & ROW FILL AWARE
+    // PRODUCTION MAPPINGS (Color & Fill Aware)
     // ------------------------------------------------------------------------
     let matchedProdRow: ExtractedRow | null = null;
     let highestProdScore = -1;
@@ -1348,9 +1478,9 @@ export async function executeMr11Pipeline(prisma: PrismaClient): Promise<string>
       : 0;
 
     const finalColumnAQ = directColumnQValue > 0 ? directColumnQValue : null;
-
     outRow['Total Produced'] = finalColumnAQ;
     outRow['Total Produced Quantity'] = finalColumnAQ;
+    outRow['produced qty'] = finalColumnAQ;
 
     if (Array.isArray(ORDERED_HEADER_LIST) && ORDERED_HEADER_LIST.length >= 43) {
       const colAQHeader = ORDERED_HEADER_LIST[42];
@@ -1360,7 +1490,6 @@ export async function executeMr11Pipeline(prisma: PrismaClient): Promise<string>
     }
 
     let latestFilledDate: string | null = null;
-
     if (matchedProdRow) {
       const COL_R_INDEX = 17;
       const COL_AV_INDEX = 47;
@@ -1414,7 +1543,7 @@ export async function executeMr11Pipeline(prisma: PrismaClient): Promise<string>
   });
 
   // --------------------------------------------------------------------------
-  // 5. STRICT SORTING: PROJECT -> STREAM -> FONT COLOR (BLACK FIRST) -> ROW COLOR
+  // 5. SORTING: PROJECT -> STREAM -> FONT COLOR (BLACK FIRST) -> ROW COLOR
   // --------------------------------------------------------------------------
   derivedMr11Rows.sort((a, b) => {
     const projA = getProjectIdentifier(a);
@@ -1445,13 +1574,14 @@ export async function executeMr11Pipeline(prisma: PrismaClient): Promise<string>
   });
 
   // --------------------------------------------------------------------------
-  // 6. ATTACH STREAM MERGE METADATA (FOR DESIGN & SHELLPLAN UI MERGING)
+  // 6. ATTACH STREAM MERGE METADATA (ONLY MERGES FOR SHELLPLAN & DESIGN)
   // --------------------------------------------------------------------------
   for (let i = 0; i < derivedMr11Rows.length; ) {
     const curProj = getProjectIdentifier(derivedMr11Rows[i]);
     const curStream = normalizeStream(derivedMr11Rows[i]['Stream']);
     let span = 1;
 
+    // Expand span across all rows sharing the exact same Project & Stream
     while (
       i + span < derivedMr11Rows.length &&
       getProjectIdentifier(derivedMr11Rows[i + span]) === curProj &&
@@ -1460,12 +1590,28 @@ export async function executeMr11Pipeline(prisma: PrismaClient): Promise<string>
       span++;
     }
 
+    // Lead row flag for ShellPlan & Design merged display
     derivedMr11Rows[i]['_isStreamLead'] = true;
     derivedMr11Rows[i]['_streamSpan'] = span;
 
+    // Follower rows receive _streamSpan = 0 ONLY for ShellPlan & Design rendering
     for (let j = 1; j < span; j++) {
       derivedMr11Rows[i + j]['_isStreamLead'] = false;
       derivedMr11Rows[i + j]['_streamSpan'] = 0;
+
+      // Duplicate lead values so non-merged table views stay consistent
+      derivedMr11Rows[i + j]['Shell Plan Status - Pending Consultant Drawings'] =
+        derivedMr11Rows[i]['Shell Plan Status - Pending Consultant Drawings'];
+      derivedMr11Rows[i + j]['shellplan status'] =
+        derivedMr11Rows[i]['shellplan status'];
+      derivedMr11Rows[i + j]['Shell Plan Approved Date'] =
+        derivedMr11Rows[i]['Shell Plan Approved Date'];
+      derivedMr11Rows[i + j]['Formwork Design Status'] =
+        derivedMr11Rows[i]['Formwork Design Status'];
+      derivedMr11Rows[i + j]['Actual Formwork Order Completion Date'] =
+        derivedMr11Rows[i]['Actual Formwork Order Completion Date'];
+      derivedMr11Rows[i + j]['Total Quantity Ordered m2'] =
+        derivedMr11Rows[i]['Total Quantity Ordered m2'];
     }
 
     i += span;
